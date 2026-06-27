@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>New Tab</title>
+    <link rel="icon" href="data:,">
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            text-align: center;
+            background: #1e1e1e;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            width: 90%;
+            max-width: 520px;
+        }
+        h1 {
+            font-size: 24px;
+            margin-bottom: 20px;
+            color: #ffffff;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #333;
+            border-radius: 6px;
+            background-color: #2a2a2a;
+            color: #fff;
+            font-size: 16px;
+            box-sizing: border-box;
+            margin-bottom: 15px;
+        }
+        input[type="text"]:focus {
+            border-color: #00adb5;
+            outline: none;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #00adb5;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        button:hover { background-color: #008f95; }
+
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 4px;
+            margin-bottom: 12px;
+            font-size: 14px;
+            color: #ccc;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+        }
+        .switch input { display: none; }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            inset: 0;
+            background-color: #444;
+            border-radius: 24px;
+            transition: .3s;
+        }
+        .slider:before {
+            content: "";
+            position: absolute;
+            height: 18px; width: 18px;
+            left: 3px; bottom: 3px;
+            background-color: #fff;
+            border-radius: 50%;
+            transition: .3s;
+        }
+        input:checked + .slider { background-color: #00adb5; }
+        input:checked + .slider:before { transform: translateX(20px); }
+
+        .note {
+            font-size: 12px;
+            color: #777;
+            margin-top: 15px;
+            text-align: left;
+            line-height: 1.6;
+        }
+        .status {
+            font-size: 11px;
+            color: #555;
+            margin-top: 8px;
+            text-align: center;
+        }
+        .status.ok { color: #00adb5; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Web Opener</h1>
+    <input type="text" id="urlInput" placeholder="https://example.com" autofocus>
+
+    <div class="toggle-row">
+        <span>🔒 厳格モード（sandbox制限・推奨）</span>
+        <label class="switch">
+            <input type="checkbox" id="strictMode" checked>
+            <span class="slider"></span>
+        </label>
+    </div>
+
+    <div class="toggle-row">
+        <span>🎭 タイトル/ファビコン偽装</span>
+        <label class="switch">
+            <input type="checkbox" id="spoofMode" checked>
+            <span class="slider"></span>
+        </label>
+    </div>
+
+    <button onclick="openSecretPage()">ページを匿名で開く</button>
+
+    <div class="status" id="swStatus">Service Worker: 初期化中...</div>
+
+    <div class="note">
+        ※ <strong>動作の仕組み：</strong><br>
+        ① 新しいタブを <code>about:blank</code> 風に開く<br>
+        ② Service Worker・sandbox・window.open上書きで新規タブ開きを傍受<br>
+        ③ どんな遷移も <code>about:blank</code> 風ラッパーで包む<br>
+        ※ HTTPS または localhost で配信してください。
+    </div>
+</div>
+
+<script>
+// ========== Service Worker 登録 ==========
+const swStatusEl = document.getElementById('swStatus');
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js', { scope: './' })
+        .then(reg => {
+            swStatusEl.textContent = 'Service Worker: 起動中 ✓';
+            swStatusEl.classList.add('ok');
+        })
+        .catch(err => {
+            swStatusEl.textContent = 'Service Worker: 利用不可（フォールバック動作）';
+        });
+} else {
+    swStatusEl.textContent = 'Service Worker: 非対応ブラウザ（フォールバック動作）';
+}
+
+// ========== メイン処理 ==========
+function openSecretPage() {
+    let url = document.getElementById('urlInput').value.trim();
+    const strict = document.getElementById('strictMode').checked;
+    const spoof  = document.getElementById('spoofMode').checked;
+
+    if (!url) { alert('URLを入力してください。'); return; }
+    if (!/^https?:\/\//i.test(url)) { url = 'https://' + url; }
+
+    // viewer.html にパラメータを渡して開く
+    // 生URLを履歴やリファラに残しにくくするため、Base64 で軽く隠す
+    const payload = btoa(unescape(encodeURIComponent(JSON.stringify({
+        url: url,
+        strict: strict,
+        spoof: spoof
+    }))));
+
+    // 1. 新しいタブを about:blank で開く
+    const newWindow = window.open('about:blank', '_blank');
+    if (!newWindow) {
+        alert('ポップアップがブロックされました。ブラウザの設定で許可してください。');
+        return;
+    }
+
+    // 2. about:blank に viewer.html を流し込む（生URLをアドレスバーに見せない）
+    //    location置換ではなく、fetchして document.write することで about:blank を維持
+    fetch('viewer.html')
+        .then(r => r.text())
+        .then(html => {
+            // ペイロードを window 変数として注入
+            const injected = html.replace(
+                '/*__PAYLOAD__*/',
+                `window.__PAYLOAD__ = "${payload}";`
+            );
+            try {
+                newWindow.document.open();
+                newWindow.document.write(injected);
+                newWindow.document.close();
+            } catch (e) {
+                // フォールバック：通常遷移
+                newWindow.location.href = 'viewer.html#' + payload;
+            }
+        })
+        .catch(() => {
+            newWindow.location.href = 'viewer.html#' + payload;
+        });
+}
+
+document.getElementById('urlInput').addEventListener('keypress', function (e) {
+    if (e.key === 'Enter') openSecretPage();
+});
+</script>
+
+</body>
+</html>
