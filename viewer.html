@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <!-- CSPメタタグ：トップレベルナビゲーションを制限 -->
+    <meta http-equiv="Content-Security-Policy" content="frame-src https: http:; child-src https: http:;">
+    <title>New Tab</title>
+    <link rel="icon" href="data:,">
+    <style>
+        html, body {
+            margin: 0; padding: 0;
+            width: 100%; height: 100%;
+            background: #000;
+            overflow: hidden;
+        }
+        #frame {
+            width: 100%; height: 100%;
+            border: none; margin: 0; padding: 0;
+            display: block;
+        }
+        #fallback {
+            position: fixed; inset: 0;
+            display: none;
+            color: #888;
+            font-family: sans-serif;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            text-align: center;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+
+<iframe id="frame" referrerpolicy="no-referrer"></iframe>
+
+<div id="fallback">
+    <h2>⚠️ 表示できません</h2>
+    <p>このサイトはセキュリティ制限（X-Frame-Options / CSP）により<br>埋め込みが拒否されました。</p>
+</div>
+
+<script>
+/*__PAYLOAD__*/
+
+// ========== ペイロード取得 ==========
+let payload;
+try {
+    const raw = window.__PAYLOAD__ || location.hash.replace(/^#/, '');
+    payload = JSON.parse(decodeURIComponent(escape(atob(raw))));
+    // ハッシュからURLを消す（履歴に生URLを残さない）
+    if (location.hash) {
+        history.replaceState(null, '', location.pathname);
+    }
+} catch (e) {
+    document.getElementById('fallback').style.display = 'flex';
+    throw e;
+}
+
+const targetURL = payload.url;
+const STRICT    = payload.strict;
+const SPOOF     = payload.spoof;
+
+// ========== タイトル/ファビコン偽装 ==========
+if (SPOOF) {
+    document.title = 'New Tab';
+    // ファビコンを空に固定
+    const setBlankIcon = () => {
+        document.querySelectorAll('link[rel*="icon"]').forEach(l => l.remove());
+        const link = document.createElement('link');
+        link.rel = 'icon';
+        link.href = 'data:,';
+        document.head.appendChild(link);
+    };
+    setBlankIcon();
+    // iframeがタイトルを変えようとしても抑え込む
+    setInterval(() => {
+        if (document.title !== 'New Tab') document.title = 'New Tab';
+    }, 500);
+}
+
+// ========== iframe 設定 ==========
+const frame = document.getElementById('frame');
+
+if (STRICT) {
+    // sandbox: 新規ウィンドウ開きとトップナビゲーションを根本ブロック
+    // allow-popups を外すことで window.open / target=_blank が動作不能になる
+    // → 後段の傍受スクリプトでさらにラップする
+    frame.setAttribute('sandbox',
+        'allow-forms allow-same-origin allow-scripts allow-pointer-lock allow-popups allow-popups-to-escape-sandbox'
+    );
+    // ↑ allow-popups は残し、傍受してラップする方針（完全ブロックだと使い物にならないため）
+}
+
+frame.src = targetURL;
+
+// X-Frame-Options で表示できないケースを検出
+let loaded = false;
+frame.addEventListener('load', () => { loaded = true; });
+setTimeout(() => {
+    if (!loaded) {
+        // iframe内が空白のままなら警告表示
+        try {
+            const doc = frame.contentDocument;
+            if (!doc || !doc.body || doc.body.children.length === 0) {
+                // 表示できているか不明なので何もしない（誤検知防止）
+            }
+        } catch (e) { /* クロスオリジンならOK */ }
+    }
+}, 4000);
+
+// ========== 新規タブ傍受の最強実装 ==========
+//
+// 戦略：
+// (1) iframe内が同一オリジンならハンドラ直接注入
+// (2) クロスオリジンは Service Worker + sandbox + window.name による間接制御
+// (3) このwindow自身の window.open も上書き（最終防衛線）
+//
+
+// --- このwindow自身の window.open を上書き ---
+const originalOpen = window.open;
+window.open = function(url, name, features) {
+    if (!url || url === 'about:blank') {
+        return originalOpen.call(window, 'about:blank', '_blank');
+    }
+    // 新規タブを about:blank で開き、viewer.html を流し込む
+    return wrapInNewTab(url);
+};
+
+// --- 新規タブをラップして開く共通関数 ---
+function wrapInNewTab(url) {
+    const w = originalOpen.call(window, 'about:blank', '_blank');
+    if (!w) return null;
+
+    const newPayload = btoa(unescape(encodeURIComponent(JSON.stringify({
+        url: url, strict: STRICT, spoof: SPOOF
+    }))));
+
+    // viewer.html を fetch して書き込み（about:blank を維持）
+    fetch(location.pathname)
+        .then(r => r.text())
+        .then(html => {
+            const injected = html.replace(
+                '/*__PAYLOAD__*/',
+                `window.__PAYLOAD__ = "${newPayload}";`
+            );
+            try {
+                w.document.open();
+                w.document.write(injected);
+                w.document.close();
+            } catch (e) {
+                w.location.href = location.pathname + '#' + newPayload;
+            }
+        })
+        .catch(() => {
+            w.location.href = location.pathname + '#' + newPayload;
+        });
+    return w;
+}
+
+// --- iframe 内に注入する傍受スクリプト（同一オリジンの場合のみ動作） ---
+function injectInterceptor() {
+    try {
+        const win = frame.contentWindow;
+        const doc = frame.contentDocument;
+        if (!win || !doc) return;
+
+        // window.open を上書き
+        win.open = function(url, name, features) {
+            if (!url) return null;
+            // 親（このwindow）の wrapInNewTab を経由
+            return wrapInNewTab(url);
+        };
+
+        // 全 <a target="_blank"> を傍受
+        const handleClick = (e) => {
+            const a = e.target.closest && e.target.closest('a');
+            if (!a) return;
+            const href = a.getAttribute('href');
+            if (!href) return;
+            // target="_blank" または Ctrl/Cmd+クリック
+            if (a.target === '_blank' || e.ctrlKey || e.metaKey || e.button === 1) {
+                e.preventDefault();
+                e.stopPropagation();
+                const absolute = new URL(href, win.location.href).href;
+                wrapInNewTab(absolute);
+            }
+        };
+        doc.addEventListener('click', handleClick, true);
+        doc.addEventListener('auxclick', handleClick, true);
+
+        // form target="_blank" も書き換え
+        doc.addEventListener('submit', (e) => {
+            const f = e.target;
+            if (f && f.target === '_blank') {
+                f.target = '_self';
+            }
+        }, true);
+
+    } catch (e) {
+        // クロスオリジンの場合はここで失敗 → Service Worker 側に任せる
+    }
+}
+
+frame.addEventListener('load', injectInterceptor);
+
+// ========== Service Worker への命令 ==========
+// クロスオリジンiframe内のリンククリックで開かれた新タブも
+// Service Worker が傍受して viewer.html にリダイレクトする
+if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({
+        type: 'SET_WRAP_MODE',
+        enabled: true,
+        viewerPath: location.pathname
+    });
+}
+
+// 新しく開かれたタブが viewer.html でない場合に検知する仕組み
+// （Service Worker が処理）
+</script>
+
+</body>
+</html>
